@@ -1,5 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { SarvamAIClient } from 'sarvamai';
+import BirthdayWisher from './BirthdayWisher';
+import VideoTranslator from './VideoTranslator';
 
 const API_KEY = '954b2595-6a49-49ec-8974-268a7cec4b69';
 
@@ -17,10 +19,11 @@ const LANGUAGES = [
   { code: 'te-IN', name: 'Telugu' }
 ];
 
-// F5 API Class
-class F5AudioAPI {
+// TTS Cloning API Class (voice cloning service)
+class TTSCloningAPI {
   constructor(baseUrl = '') {
     this.baseUrl = baseUrl; // Empty string uses proxy
+    this.cloningUrl = 'http://localhost:3001/voice-cloning'; // Use CORS proxy
   }
 
   // Convert audio blob to WAV format
@@ -228,41 +231,65 @@ class F5AudioAPI {
         }
       }
     
-    // Voice cloning mode - try F5 first, then fallback to Sarvam TTS
+    // Voice cloning mode - try TTS Cloning first, then fallback to Sarvam TTS
     try {
-      console.log('🎭 Using voice cloning mode - trying F5 API first');
+      console.log('🎭 Using voice cloning mode - trying TTS Cloning API first');
       
-      // First convert to proper WAV format
-      const wavBlob = await this.convertToWav(audioFile);
-      const audioBase64 = await this.fileToBase64(wavBlob);
+      // Use the user's recorded audio as reference for voice cloning
+      console.log('🎤 Using user recorded audio as reference:', {
+        size: audioFile.size,
+        type: audioFile.type,
+        name: audioFile.name
+      });
       
+      // Convert user's webm audio to WAV format for TTS Cloning compatibility
+      let referenceAudioBase64;
+      if (audioFile.type.includes('webm')) {
+        console.log('🔄 Converting webm audio to WAV for TTS Cloning...');
+        const wavBlob = await this.convertToWav(audioFile);
+        referenceAudioBase64 = await this.fileToBase64(wavBlob);
+        console.log('✅ Converted webm to WAV for TTS Cloning');
+      } else {
+        referenceAudioBase64 = await this.fileToBase64(audioFile);
+      }
+
+      // Create TTS Cloning payload
       const payload = {
-        gen_text: genText,
-        ref_text: refText,
-        audio_base64: `data:audio/wav;base64,${audioBase64}`
+        inputs: [
+          { 
+            name: "ref_audio", 
+            shape: [1], 
+            datatype: "BYTES", 
+            data: [referenceAudioBase64] 
+          },
+          { 
+            name: "ref_text", 
+            shape: [1], 
+            datatype: "BYTES", 
+            data: [refText] 
+          },
+          { 
+            name: "gen_text", 
+            shape: [1], 
+            datatype: "BYTES", 
+            data: [genText] 
+          }
+        ],
+        outputs: [{ name: "gen_audio" }]
       };
       
-      // Debug logging
-      console.log('🎯 F5 API Debug Info:');
-      console.log('Generated Text:', genText);
-      console.log('Reference Text:', refText);
-      console.log('Original Audio:', { type: audioFile.type, size: audioFile.size });
-      console.log('Converted WAV:', { type: wavBlob.type, size: wavBlob.size });
-      console.log('Base64 Audio Length:', audioBase64.length);
-      console.log('Base64 Audio Preview:', audioBase64.substring(0, 100) + '...');
-      console.log('Full Payload:', JSON.stringify(payload, null, 2));
+      console.log('🎭 TTS Cloning payload ready:', JSON.stringify(payload).length, 'bytes');
       
-      const response = await fetch(`${this.baseUrl}/f5`, {
+      const response = await fetch(this.cloningUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(30000) // 30 second timeout
       });
       
-      console.log('🔍 F5 API Response Info:');
-      console.log('Response Status:', response.status);
-      console.log('Response Headers:', Object.fromEntries(response.headers.entries()));
+      console.log('🔍 TTS Cloning response:', response.status);
       
       if (!response.ok) {
         const errorText = await response.text();
@@ -270,17 +297,32 @@ class F5AudioAPI {
         throw new Error(`API request failed: ${response.status} - ${errorText}`);
       }
       
-      const data = await response.json();
-      console.log('✅ Success Response:', data);
+      const result = await response.json();
+      console.log('✅ TTS Cloning Success Response:', { 
+        model: result.model_name, 
+        version: result.model_version,
+        outputsLength: result.outputs?.length 
+      });
       
-      if (!data.audio_base64) {
-        throw new Error('No audio data in response');
+      if (result.outputs && result.outputs[0]?.data) {
+        const rawAudio = result.outputs[0].data;
+        const flattenAudio = (data) => Array.isArray(data) ? data.flat(Infinity) : [data];
+        const floatArray = flattenAudio(rawAudio);
+        const float32Array = Float32Array.from(floatArray);
+        const audio_base64 = this.float32ToWav(float32Array, 24000); // Convert to WAV
+        return { success: true, audio_base64: audio_base64, source: 'TTS-Cloning-VoiceClone' };
+      } else {
+        throw new Error('No audio data in TTS Cloning response');
       }
       
-      return { success: true, audio_base64: data.audio_base64, source: 'F5-VoiceClone' };
-      
           } catch (error) {
-        console.warn('🚨 F5 API failed, trying Sarvam TTS Bulbul fallback...', error);
+        console.warn('🚨 TTS Cloning API failed, trying Sarvam TTS Bulbul fallback...', error);
+        // Log specific error types for debugging
+        if (error.message.includes('CUDA')) {
+          console.warn('🚨 CUDA memory error detected - TTS Cloning server GPU issue');
+        } else if (error.message.includes('illegal memory access')) {
+          console.warn('🚨 GPU memory access error - TTS Cloning server needs restart');
+        }
         
         // Fallback to Sarvam TTS Bulbul API
         const fallbackResult = await this.generateAudioWithSarvam(genText, targetLanguage, apiKey);
@@ -289,7 +331,7 @@ class F5AudioAPI {
           return { success: true, audio_base64: fallbackResult.audio_base64, source: 'Sarvam-Bulbul-Fallback' };
         }
         
-        return { success: false, error: `Both F5 (${error.message}) and Sarvam TTS Bulbul (${fallbackResult.error}) failed` };
+        return { success: false, error: `Both TTS Cloning (${error.message}) and Sarvam TTS Bulbul (${fallbackResult.error}) failed` };
       }
   }
   
@@ -304,9 +346,57 @@ class F5AudioAPI {
       reader.onerror = error => reject(error);
     });
   }
+
+  // Convert Float32Array to WAV buffer (for TTS Cloning response processing)
+  float32ToWav(float32Array, sampleRate = 24000) {
+    const numChannels = 1;
+    const bitsPerSample = 16;
+    const bytesPerSample = bitsPerSample / 8;
+    const blockAlign = numChannels * bytesPerSample;
+    const byteRate = sampleRate * blockAlign;
+    
+    const arrayBuffer = new ArrayBuffer(44 + float32Array.length * 2);
+    const view = new DataView(arrayBuffer);
+
+    const writeString = (offset, string) => {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    };
+
+    // WAV header
+    writeString(0, "RIFF");
+    view.setUint32(4, 36 + float32Array.length * 2, true);
+    writeString(8, "WAVE");
+    writeString(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    writeString(36, "data");
+    view.setUint32(40, float32Array.length * 2, true);
+
+    // Convert float32 samples to 16-bit PCM
+    let offset = 44;
+    for (let i = 0; i < float32Array.length; i++) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        offset += 2;
+    }
+    const bytes = new Uint8Array(arrayBuffer);
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary); // Return base64 string
+  }
 }
 
 function App() {
+  const [activeTab, setActiveTab] = useState('translator'); // 'translator', 'birthday', or 'video'
   const [isRecording, setIsRecording] = useState(false);
   const [audioBlob, setAudioBlob] = useState(null);
   const [selectedLanguage, setSelectedLanguage] = useState('hi-IN');
@@ -319,38 +409,26 @@ function App() {
   const [voiceCloningMode, setVoiceCloningMode] = useState('standard'); // 'standard' or 'cloning'
   const [sessionHistory, setSessionHistory] = useState([]); // Store all interactions
   const [playingHistoryIndex, setPlayingHistoryIndex] = useState(null); // Track which history item is playing
+  const [audioGenerationFailed, setAudioGenerationFailed] = useState(false); // Track if audio generation failed
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const sarvamClient = new SarvamAIClient({ apiSubscriptionKey: API_KEY });
-  const f5Api = new F5AudioAPI();
+  const ttsApi = new TTSCloningAPI();
 
   // Start recording
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
-      // Check supported formats and choose the best one
-      const supportedTypes = [
-        'audio/webm',
-        'audio/webm;codecs=opus',
-        'audio/mp4',
-        'audio/wav'
-      ];
-      
-      let selectedType = '';
-      for (const type of supportedTypes) {
-        if (MediaRecorder.isTypeSupported(type)) {
-          selectedType = type;
-          console.log('🎯 Selected MediaRecorder type:', type);
-          break;
-        }
-      }
+      // Setup MediaRecorder with best supported format
+      const supportedTypes = ['audio/wav', 'audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+      const selectedType = supportedTypes.find(type => MediaRecorder.isTypeSupported(type)) || '';
       
       mediaRecorderRef.current = new MediaRecorder(stream, selectedType ? { mimeType: selectedType } : {});
       audioChunksRef.current = [];
       
-      console.log('🎤 MediaRecorder created with type:', mediaRecorderRef.current.mimeType);
+      console.log('🎤 Recording with:', mediaRecorderRef.current.mimeType || 'default format');
 
       mediaRecorderRef.current.ondataavailable = (event) => {
         audioChunksRef.current.push(event.data);
@@ -360,12 +438,11 @@ function App() {
         const actualMimeType = mediaRecorderRef.current.mimeType || 'audio/webm';
         const blob = new Blob(audioChunksRef.current, { type: actualMimeType });
         
-        // Debug: Check what MediaRecorder actually produced
-        console.log('🎤 MediaRecorder Debug Info:');
-        console.log('Chunks count:', audioChunksRef.current.length);
-        console.log('Blob type:', blob.type);
-        console.log('Blob size:', blob.size);
-        console.log('MediaRecorder mimeType:', mediaRecorderRef.current.mimeType);
+        console.log('🎵 Recording complete:', { 
+          chunks: audioChunksRef.current.length, 
+          size: blob.size, 
+          type: blob.type 
+        });
         
         setAudioBlob(blob);
         stream.getTracks().forEach(track => track.stop());
@@ -393,6 +470,8 @@ function App() {
     }
   };
 
+  // Note: Removed unused audio conversion functions - using F5AudioAPI.convertToWav() instead
+
   // Process audio with a specific blob (for auto-processing)
   const processAudioWithBlob = async (blob) => {
     if (!blob) {
@@ -402,14 +481,51 @@ function App() {
     
     setProcessing(true);
     setCurrentStep('Transcribing audio...');
+    setAudioGenerationFailed(false); // Reset audio generation state
 
     try {
       // Step 1: Transcribe audio
-      const audioFile = new File([blob], 'recording.wav', { type: 'audio/wav' });
-      
-      const transcriptionResponse = await sarvamClient.speechToText.transcribe(audioFile, {
-        model: 'saarika:v2',
+      console.log('🎤 Audio blob details:', {
+        size: blob.size,
+        type: blob.type,
+        constructor: blob.constructor.name
       });
+      
+      // Convert blob to proper WAV format for Sarvam STT
+      let audioFile;
+      
+      // Create audio file with proper MIME type for Sarvam STT
+      // Strip codec specification if present (e.g., 'audio/webm;codecs=opus' → 'audio/webm')
+      const mimeType = blob.type.includes('webm') && blob.type.includes('codecs=') 
+        ? 'audio/webm' 
+        : blob.type;
+      
+      audioFile = new File([blob], 'recording.webm', { type: mimeType });
+      console.log('📁 Audio file ready:', { size: audioFile.size, type: audioFile.type });
+      
+      console.log('🎤 Sending to Sarvam STT:', { size: audioFile.size, type: audioFile.type });
+      
+      // Use direct fetch like the working test instead of SDK
+      const formData = new FormData();
+      formData.append('file', audioFile);
+      formData.append('model', 'saarika:v2');
+      
+      const sttResponse = await fetch('https://api.sarvam.ai/speech-to-text', {
+        method: 'POST',
+        headers: {
+          'API-Subscription-Key': API_KEY
+        },
+        body: formData
+      });
+      
+      if (!sttResponse.ok) {
+        const errorData = await sttResponse.json();
+        console.error('❌ STT API Error:', errorData);
+        throw new Error(`STT API Error: ${JSON.stringify(errorData)}`);
+      }
+      
+      const transcriptionResponse = await sttResponse.json();
+      console.log('✅ STT Response received:', transcriptionResponse);
 
       const transcribed = transcriptionResponse.transcript;
       const detectedLanguage = transcriptionResponse.language_code;
@@ -429,7 +545,7 @@ function App() {
 
       // Step 3: Generate audio based on selected mode
       setCurrentStep('Generating audio...');
-      const audioResult = await f5Api.generateAudio(translated, transcribed, blob, selectedLanguage, API_KEY, voiceCloningMode);
+      const audioResult = await ttsApi.generateAudio(translated, transcribed, audioFile, selectedLanguage, API_KEY, voiceCloningMode);
       
       if (audioResult.success) {
         setGeneratedAudio(audioResult.audio_base64);
@@ -459,6 +575,10 @@ function App() {
       } else {
         console.warn('Audio generation failed:', audioResult.error);
         setCurrentStep('Translation completed! (Audio generation unavailable)');
+        // Only show the warning message if both TTS Cloning AND Sarvam TTS fallback failed
+        if (voiceCloningMode === 'cloning') {
+          setAudioGenerationFailed(true);
+        }
         // Don't set generatedAudio, so the Play Audio button won't appear
       }
 
@@ -468,10 +588,29 @@ function App() {
       }, 2000);
 
     } catch (error) {
-      console.error('Processing error:', error);
-      alert(`Error processing: ${error.message}`);
+      console.error('❌ Processing error:', error);
+      
+      // More detailed error handling
+      if (error.message && error.message.includes('400')) {
+        console.error('🚨 Sarvam API 400 Error Details:', {
+          error: error,
+          message: error.message,
+          stack: error.stack
+        });
+        
+        // Check if it's an STT error
+        if (error.message.includes('speech-to-text') || error.message.includes('transcribe')) {
+          alert(`❌ Speech-to-Text Error: The audio format may not be supported by Sarvam AI.\n\nDetails: ${error.message}\n\nTry:\n1. Record for longer (5+ seconds)\n2. Speak clearly into microphone\n3. Check microphone permissions`);
+        } else {
+          alert(`❌ API Error: ${error.message}`);
+        }
+      } else {
+        alert(`❌ Processing Error: ${error.message}`);
+      }
+      
       setProcessing(false);
       setCurrentStep('');
+      setAudioGenerationFailed(false);
     }
   };
 
@@ -604,18 +743,61 @@ function App() {
 
 
   return (
-    <div className="min-h-screen py-12 px-4 sm:px-6 lg:px-8" style={{ backgroundColor: '#F4EFE4' }}>
-      <div className="max-w-3xl mx-auto">
-                  <div className="text-center mb-12">
-            <h1 className="text-4xl font-bold text-black mb-4">
-              🎤 Sarvam Voice Translation
-            </h1>
-            <p className="text-xl text-black">
-              Record, translate, and listen to your voice in different languages
-            </p>
+    <div className="min-h-screen py-12 px-4 sm:px-6 lg:px-8" style={{ 
+      backgroundColor: '#F4EFE4'
+    }}>
+      <div className="max-w-4xl mx-auto">
+        {/* Tab Navigation */}
+        <div className="flex justify-center mb-8">
+          <div className="bg-white rounded-full p-2 shadow-lg">
+            <div className="flex space-x-2">
+              <button
+                onClick={() => setActiveTab('translator')}
+                className={`px-4 py-3 rounded-full font-semibold transition-colors duration-200 text-sm ${
+                  activeTab === 'translator'
+                    ? 'bg-blue-500 text-white shadow-md'
+                    : 'text-gray-600 hover:text-blue-500'
+                }`}
+              >
+                🎤 Voice Translator
+              </button>
+              <button
+                onClick={() => setActiveTab('birthday')}
+                className={`px-4 py-3 rounded-full font-semibold transition-colors duration-200 text-sm ${
+                  activeTab === 'birthday'
+                    ? 'bg-gradient-to-r from-yellow-400 to-yellow-600 text-black shadow-md'
+                    : 'text-gray-600 hover:text-yellow-600'
+                }`}
+              >
+                🎂 Birthday Wisher
+              </button>
+              {false && <button
+                onClick={() => setActiveTab('video')}
+                className={`px-4 py-3 rounded-full font-semibold transition-colors duration-200 text-sm ${
+                  activeTab === 'video'
+                    ? 'bg-purple-500 text-white shadow-md'
+                    : 'text-gray-600 hover:text-purple-500'
+                }`}
+              >
+                🎬 Video Translator
+              </button>}
+            </div>
           </div>
+        </div>
 
-        <div className="bg-white rounded-2xl shadow-xl p-8 space-y-8">
+        {/* Render Active Tab Content */}
+        {activeTab === 'translator' ? (
+          <div>
+            <div className="text-center mb-12">
+              <h1 className="text-4xl font-bold text-black mb-4">
+                🎤 Sarvam Voice Translation
+              </h1>
+              <p className="text-xl text-black">
+                Record, translate, and listen to your voice in different languages
+              </p>
+            </div>
+
+            <div className="bg-white rounded-2xl shadow-xl p-8 space-y-8">
           {/* Language Selection */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-3">
@@ -754,14 +936,11 @@ function App() {
                     )}
                   </button>
                 </div>
-              ) : translatedText && (
+              ) : translatedText && audioGenerationFailed && (
                 <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-center">
                   <h3 className="text-lg font-semibold text-gray-800 mb-2">Audio Generation</h3>
                   <p className="text-yellow-700">
-                    🔧 {voiceCloningMode === 'cloning' 
-                      ? 'Voice cloning service is currently unavailable.' 
-                      : 'Text-to-speech service is currently unavailable.'
-                    }<br />
+                    🔧 Voice cloning service is currently unavailable.<br />
                     Your text has been successfully transcribed and translated!
                   </p>
                 </div>
@@ -870,7 +1049,13 @@ function App() {
               </button>
             </div>
           )}
-        </div>
+            </div>
+          </div>
+        ) : activeTab === 'birthday' ? (
+          <BirthdayWisher apiKey={API_KEY} />
+        ) : (
+          <VideoTranslator apiKey={API_KEY} />
+        )}
       </div>
     </div>
   );

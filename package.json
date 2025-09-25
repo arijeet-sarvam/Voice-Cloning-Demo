@@ -7,6 +7,11 @@
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^13.5.0",
+    "canvas-confetti": "^1.9.3",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "framer-motion": "^12.23.21",
+    "node-fetch": "^3.3.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-scripts": "5.0.1",
@@ -42,5 +47,5 @@
     "postcss": "^8.5.5",
     "tailwindcss": "^3.4.17"
   },
-  "proxy": "http://34.100.221.107:8967"
+  "_proxy_disabled": "http://34.100.221.107:8967"
 }
