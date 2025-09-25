@@ -2,7 +2,10 @@
 class TTSCloningAPI {
   constructor(baseUrl = '') {
     this.baseUrl = baseUrl;
-    this.cloningUrl = 'http://localhost:3001/voice-cloning'; // Use CORS proxy
+    // Use environment-based URL for production vs development
+    this.cloningUrl = process.env.NODE_ENV === 'production' 
+      ? '/api/voice-cloning' // Vercel serverless function in production
+      : 'http://localhost:3001/voice-cloning'; // Local proxy in development
   }
 
   // Convert audio blob to WAV format
@@ -118,6 +121,8 @@ class TTSCloningAPI {
       };
       
       console.log('🎭 TTS Cloning payload ready:', JSON.stringify(payload).length, 'bytes');
+      console.log('🌐 Using TTS Cloning URL:', this.cloningUrl);
+      console.log('🏗️ Environment:', process.env.NODE_ENV);
       
       const response = await fetch(this.cloningUrl, {
         method: 'POST',
